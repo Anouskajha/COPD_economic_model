@@ -1,0 +1,343 @@
+"""
+COPD-CVD Markov Model: One-Way Sensitivity Analysis (OWSA)
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
+# Configuration
+N_CYCLES = 480
+N_STATES = 19
+CYCLE_LENGTH = 1/12
+OUTPUT_PATH = Path.cwd() / "model_outputs"
+
+if not OUTPUT_PATH.exists():
+    os.makedirs(OUTPUT_PATH)
+
+# Parameters to test in OWSA
+PARAMETERS_TO_TEST = {
+    'rr_exac_treatment': {'base': 0.78, 'lower': 0.69, 'upper': 0.88, 'name': 'Treatment effect (RR)', 'category': 'Treatment'},
+    'rr_MI_postExac': {'base': 2.27, 'lower': 1.88, 'upper': 2.74, 'name': 'Post-exac MI risk (RR)', 'category': 'CVD Risk'},
+    'rr_stroke_postExac': {'base': 1.83, 'lower': 1.44, 'upper': 2.33, 'name': 'Post-exac stroke risk (RR)', 'category': 'CVD Risk'},
+    'rr_death_postExac': {'base': 1.50, 'lower': 1.20, 'upper': 1.88, 'name': 'Post-exac mortality (RR)', 'category': 'CVD Risk'},
+    'rate_exac_G2': {'base': 0.15, 'lower': 0.10, 'upper': 0.22, 'name': 'Exac rate GOLD II', 'category': 'Clinical'},
+    'rate_exac_G3': {'base': 0.30, 'lower': 0.20, 'upper': 0.42, 'name': 'Exac rate GOLD III', 'category': 'Clinical'},
+    'rate_exac_G4': {'base': 0.55, 'lower': 0.40, 'upper': 0.75, 'name': 'Exac rate GOLD IV', 'category': 'Clinical'},
+    'util_G2_noCVD': {'base': 0.78, 'lower': 0.74, 'upper': 0.82, 'name': 'Utility GOLD II', 'category': 'Utility'},
+    'util_G3_noCVD': {'base': 0.70, 'lower': 0.65, 'upper': 0.75, 'name': 'Utility GOLD III', 'category': 'Utility'},
+    'util_G4_noCVD': {'base': 0.55, 'lower': 0.48, 'upper': 0.62, 'name': 'Utility GOLD IV', 'category': 'Utility'},
+    'disutil_exac': {'base': 0.13, 'lower': 0.09, 'upper': 0.17, 'name': 'Exacerbation disutility', 'category': 'Utility'},
+    'cost_drug_LAMA': {'base': 28.60, 'lower': 22.88, 'upper': 34.32, 'name': 'Drug cost LAMA', 'category': 'Cost'},
+    'cost_drug_LABALAMA': {'base': 32.50, 'lower': 26.00, 'upper': 39.00, 'name': 'Drug cost LABA/LAMA', 'category': 'Cost'},
+    'cost_exac': {'base': 2150, 'lower': 1600, 'upper': 2800, 'name': 'Cost per exacerbation', 'category': 'Cost'},
+    'cost_MI_acute': {'base': 7700, 'lower': 5800, 'upper': 10000, 'name': 'Acute MI cost', 'category': 'Cost'},
+    'cost_stroke_acute': {'base': 9000, 'lower': 6800, 'upper': 11700, 'name': 'Acute stroke cost', 'category': 'Cost'},
+    'cfr_MI': {'base': 0.10, 'lower': 0.07, 'upper': 0.14, 'name': 'MI case fatality', 'category': 'Clinical'},
+    'cfr_stroke': {'base': 0.18, 'lower': 0.13, 'upper': 0.24, 'name': 'Stroke case fatality', 'category': 'Clinical'},
+    'cfr_exac': {'base': 0.05, 'lower': 0.03, 'upper': 0.08, 'name': 'Exac case fatality', 'category': 'Clinical'},
+    'discount_rate': {'base': 0.035, 'lower': 0.015, 'upper': 0.060, 'name': 'Discount rate', 'category': 'Structural'},
+}
+
+# ============================================================================
+# MODEL FUNCTIONS
+# ============================================================================
+
+def get_base_case_params():
+    """Return all parameters at base case values."""
+    return {
+        'rr_exac_treatment': 0.78, 'prog_G2_G3': 0.06, 'prog_G3_G4': 0.04,
+        'rate_exac_G2': 0.15, 'rate_exac_G3': 0.30, 'rate_exac_G4': 0.55,
+        'rate_MI_G2_noCVD': 0.018, 'rate_MI_G3_noCVD': 0.030, 'rate_MI_G4_noCVD': 0.045,
+        'rate_stroke_G2_noCVD': 0.012, 'rate_stroke_G3_noCVD': 0.020, 'rate_stroke_G4_noCVD': 0.030,
+        'rate_MI_postMI': 0.050, 'rate_stroke_postStroke': 0.065,
+        'rr_MI_postExac': 2.27, 'rr_stroke_postExac': 1.83, 'rr_death_postExac': 1.50,
+        'cfr_MI': 0.10, 'cfr_stroke': 0.18, 'cfr_exac': 0.05,
+        'mort_COPD_G2': 0.020, 'mort_COPD_G3': 0.040, 'mort_COPD_G4': 0.085,
+        'mort_background': 0.015, 'mort_excess_postMI': 0.030, 'mort_excess_postStroke': 0.050,
+        'util_G2_noCVD': 0.78, 'util_G3_noCVD': 0.70, 'util_G4_noCVD': 0.55,
+        'util_gen_pop': 0.83, 'util_postMI_ref': 0.76, 'util_postStroke_ref': 0.67, 'disutil_exac': 0.13,
+        'cost_drug_LAMA': 28.60, 'cost_drug_LABALAMA': 32.50,
+        'cost_maint_G2': 35.00, 'cost_maint_G3': 56.67, 'cost_maint_G4': 104.17,
+        'cost_postMI_monthly': 70.83, 'cost_postStroke_monthly': 200.00,
+        'cost_exac': 2150, 'cost_MI_acute': 7700, 'cost_stroke_acute': 9000,
+        'discount_rate': 0.035,
+    }
+
+def calculate_derived_params(params):
+    """Calculate utility and cost vectors for all 19 states."""
+    MI_mult = params['util_postMI_ref'] / params['util_gen_pop']
+    stroke_mult = params['util_postStroke_ref'] / params['util_gen_pop']
+    
+    params['utilities'] = np.array([
+        params['util_G2_noCVD'], params['util_G2_noCVD'] * MI_mult, params['util_G2_noCVD'] * stroke_mult,
+        max(0, params['util_G2_noCVD'] - params['disutil_exac']),
+        max(0, params['util_G2_noCVD'] * MI_mult - params['disutil_exac']),
+        max(0, params['util_G2_noCVD'] * stroke_mult - params['disutil_exac']),
+        params['util_G3_noCVD'], params['util_G3_noCVD'] * MI_mult, params['util_G3_noCVD'] * stroke_mult,
+        max(0, params['util_G3_noCVD'] - params['disutil_exac']),
+        max(0, params['util_G3_noCVD'] * MI_mult - params['disutil_exac']),
+        max(0, params['util_G3_noCVD'] * stroke_mult - params['disutil_exac']),
+        params['util_G4_noCVD'], params['util_G4_noCVD'] * MI_mult, params['util_G4_noCVD'] * stroke_mult,
+        max(0, params['util_G4_noCVD'] - params['disutil_exac']),
+        max(0, params['util_G4_noCVD'] * MI_mult - params['disutil_exac']),
+        max(0, params['util_G4_noCVD'] * stroke_mult - params['disutil_exac']),
+        0.0
+    ])
+    
+    def build_costs(drug):
+        return np.array([
+            params['cost_maint_G2'] + drug, params['cost_maint_G2'] + drug + params['cost_postMI_monthly'],
+            params['cost_maint_G2'] + drug + params['cost_postStroke_monthly'],
+            params['cost_maint_G2'] + drug, params['cost_maint_G2'] + drug + params['cost_postMI_monthly'],
+            params['cost_maint_G2'] + drug + params['cost_postStroke_monthly'],
+            params['cost_maint_G3'] + drug, params['cost_maint_G3'] + drug + params['cost_postMI_monthly'],
+            params['cost_maint_G3'] + drug + params['cost_postStroke_monthly'],
+            params['cost_maint_G3'] + drug, params['cost_maint_G3'] + drug + params['cost_postMI_monthly'],
+            params['cost_maint_G3'] + drug + params['cost_postStroke_monthly'],
+            params['cost_maint_G4'] + drug, params['cost_maint_G4'] + drug + params['cost_postMI_monthly'],
+            params['cost_maint_G4'] + drug + params['cost_postStroke_monthly'],
+            params['cost_maint_G4'] + drug, params['cost_maint_G4'] + drug + params['cost_postMI_monthly'],
+            params['cost_maint_G4'] + drug + params['cost_postStroke_monthly'],
+            0.0
+        ])
+    params['costs_comp'] = build_costs(params['cost_drug_LAMA'])
+    params['costs_intv'] = build_costs(params['cost_drug_LABALAMA'])
+    return params
+
+def annual_to_monthly(rate):
+    return 1 - np.exp(-rate / 12) if rate > 0 else 0
+
+def build_transition_matrix(params, arm='comparator'):
+    P = np.zeros((N_STATES, N_STATES))
+    exac_mult = params['rr_exac_treatment'] if arm == 'intervention' else 1.0
+    
+    tunnel_exit = {3:0, 4:1, 5:2, 9:6, 10:7, 11:8, 15:12, 16:13, 17:14}
+    stable_to_tunnel = {0:3, 1:4, 2:5, 6:9, 7:10, 8:11, 12:15, 13:16, 14:17}
+    noCVD_to_postMI = {0:1, 3:1, 6:7, 9:7, 12:13, 15:13}
+    noCVD_to_postStroke = {0:2, 3:2, 6:8, 9:8, 12:14, 15:14}
+    prog_target = {0:6, 1:7, 2:8, 6:12, 7:13, 8:14}
+    
+    gold_stage = ['II']*6 + ['III']*6 + ['IV']*6 + ['Death']
+    cvd_status = ['none', 'postMI', 'postStroke'] * 6 + ['Death']
+    is_tunnel = [False, False, False, True, True, True] * 3 + [False]
+    
+    for s in range(N_STATES):
+        if s == 18:
+            P[18, 18] = 1.0
+            continue
+        
+        gold, cvd, tunnel = gold_stage[s], cvd_status[s % 6], is_tunnel[s]
+        
+        if gold == 'II':
+            rate_exac, rate_MI_base, rate_stroke_base = params['rate_exac_G2'], params['rate_MI_G2_noCVD'], params['rate_stroke_G2_noCVD']
+            mort_COPD, rate_prog = params['mort_COPD_G2'], params['prog_G2_G3']
+        elif gold == 'III':
+            rate_exac, rate_MI_base, rate_stroke_base = params['rate_exac_G3'], params['rate_MI_G3_noCVD'], params['rate_stroke_G3_noCVD']
+            mort_COPD, rate_prog = params['mort_COPD_G3'], params['prog_G3_G4']
+        else:
+            rate_exac, rate_MI_base, rate_stroke_base = params['rate_exac_G4'], params['rate_MI_G4_noCVD'], params['rate_stroke_G4_noCVD']
+            mort_COPD, rate_prog = params['mort_COPD_G4'], 0
+        
+        if cvd == 'postMI':
+            rate_MI, rate_stroke, mort_excess = params['rate_MI_postMI'], rate_stroke_base * 1.5, params['mort_excess_postMI']
+        elif cvd == 'postStroke':
+            rate_MI, rate_stroke, mort_excess = rate_MI_base * 1.4, params['rate_stroke_postStroke'], params['mort_excess_postStroke']
+        else:
+            rate_MI, rate_stroke, mort_excess = rate_MI_base, rate_stroke_base, 0
+        
+        p_MI = annual_to_monthly(rate_MI)
+        p_stroke = annual_to_monthly(rate_stroke)
+        p_exac = annual_to_monthly(rate_exac) * exac_mult
+        p_prog = annual_to_monthly(rate_prog)
+        p_mort = annual_to_monthly(mort_COPD + params['mort_background'] + mort_excess)
+        
+        if tunnel:
+            p_MI *= params['rr_MI_postExac']
+            p_stroke *= params['rr_stroke_postExac']
+            p_mort *= params['rr_death_postExac']
+        
+        p_MI_survive, p_MI_die = p_MI * (1 - params['cfr_MI']), p_MI * params['cfr_MI']
+        p_stroke_survive, p_stroke_die = p_stroke * (1 - params['cfr_stroke']), p_stroke * params['cfr_stroke']
+        p_exac_survive, p_exac_die = p_exac * (1 - params['cfr_exac']), p_exac * params['cfr_exac']
+        
+        if tunnel:
+            P[s, 18] = min(p_mort + p_MI_die + p_stroke_die, 0.99)
+            if cvd == 'none' and s in noCVD_to_postMI:
+                P[s, noCVD_to_postMI[s]] = p_MI_survive
+                P[s, noCVD_to_postStroke[s]] = p_stroke_survive
+            P[s, tunnel_exit[s]] = max(1 - P[s, :].sum(), 0)
+        else:
+            P[s, 18] = min(p_mort + p_MI_die + p_stroke_die + p_exac_die, 0.99)
+            if cvd == 'none' and s in noCVD_to_postMI:
+                P[s, noCVD_to_postMI[s]] = p_MI_survive
+                P[s, noCVD_to_postStroke[s]] = p_stroke_survive
+            if s in stable_to_tunnel:
+                P[s, stable_to_tunnel[s]] = p_exac_survive
+            if s in prog_target:
+                P[s, prog_target[s]] = p_prog
+            P[s, s] = max(1 - P[s, :].sum(), 0)
+    return P
+
+def run_markov_trace(P, initial_dist):
+    trace = np.zeros((N_CYCLES + 1, N_STATES))
+    trace[0, :] = initial_dist
+    for t in range(1, N_CYCLES + 1):
+        trace[t, :] = trace[t-1, :] @ P
+    return trace
+
+def calculate_outcomes(trace, params, arm):
+    costs = params['costs_comp'] if arm == 'comparator' else params['costs_intv']
+    r = params.get('discount_rate', 0.035)
+    
+    years = np.arange(N_CYCLES + 1) * CYCLE_LENGTH
+    disc = 1 / (1 + r) ** years
+    hc = np.ones(N_CYCLES + 1)
+    hc[0], hc[-1] = 0.5, 0.5
+    
+    qaly = (trace * params['utilities']).sum(axis=1) * CYCLE_LENGTH
+    state_cost = (trace * costs).sum(axis=1)
+    
+    tunnel_states = [3, 4, 5, 9, 10, 11, 15, 16, 17]
+    exac_cost = trace[:, tunnel_states].sum(axis=1) * params['cost_exac']
+    
+    cvd_cost = np.zeros(N_CYCLES + 1)
+    for t in range(1, N_CYCLES + 1):
+        new_MI = max(0, trace[t, [1,7,13]].sum() - trace[t-1, [1,7,13]].sum())
+        new_stroke = max(0, trace[t, [2,8,14]].sum() - trace[t-1, [2,8,14]].sum())
+        cvd_cost[t] = new_MI * params['cost_MI_acute'] + new_stroke * params['cost_stroke_acute']
+    
+    return {
+        'qaly': (qaly * disc * hc).sum(),
+        'cost': ((state_cost + exac_cost + cvd_cost) * disc * hc).sum()
+    }
+
+def run_model(params):
+    params = calculate_derived_params(params)
+    
+    init = np.zeros(N_STATES)
+    init[0], init[1], init[2] = 0.45 * 0.80, 0.45 * 0.12, 0.45 * 0.08
+    init[6], init[7], init[8] = 0.40 * 0.80, 0.40 * 0.12, 0.40 * 0.08
+    init[12], init[13], init[14] = 0.15 * 0.80, 0.15 * 0.12, 0.15 * 0.08
+    
+    trace_comp = run_markov_trace(build_transition_matrix(params, 'comparator'), init)
+    trace_intv = run_markov_trace(build_transition_matrix(params, 'intervention'), init)
+    
+    out_comp = calculate_outcomes(trace_comp, params, 'comparator')
+    out_intv = calculate_outcomes(trace_intv, params, 'intervention')
+    
+    incr_qaly = out_intv['qaly'] - out_comp['qaly']
+    incr_cost = out_intv['cost'] - out_comp['cost']
+    
+    if incr_qaly > 0 and incr_cost < 0:
+        icer = 'Dominant'
+    elif incr_qaly < 0 and incr_cost > 0:
+        icer = 'Dominated'
+    elif incr_qaly <= 0:
+        icer = float('inf')
+    else:
+        icer = incr_cost / incr_qaly
+    
+    return {'incr_qaly': incr_qaly, 'incr_cost': incr_cost, 'icer': icer}
+
+# ============================================================================
+# RUN OWSA
+# ============================================================================
+
+print("COPD-CVD Model: One-Way Sensitivity Analysis")
+print("=" * 50)
+
+# Step 1: Base case
+base = run_model(get_base_case_params())
+print(f"\nBase case: dQALYs={base['incr_qaly']:.4f}, dCosts=£{base['incr_cost']:,.0f}, ICER={base['icer']}")
+
+# Step 2: OWSA loop
+print("\nRunning OWSA...")
+results = []
+
+def to_numeric(icer):
+    if icer == 'Dominant': return -30000
+    if icer == 'Dominated': return 80000
+    return min(max(icer, -30000), 80000)
+
+for key, info in PARAMETERS_TO_TEST.items():
+    p_low = get_base_case_params()
+    p_low[key] = info['lower']
+    r_low = run_model(p_low)
+    
+    p_high = get_base_case_params()
+    p_high[key] = info['upper']
+    r_high = run_model(p_high)
+    
+    results.append({
+        'name': info['name'],
+        'category': info['category'],
+        'icer_lower': r_low['icer'],
+        'icer_upper': r_high['icer'],
+        'icer_lower_num': to_numeric(r_low['icer']),
+        'icer_upper_num': to_numeric(r_high['icer']),
+    })
+
+df = pd.DataFrame(results)
+df['swing'] = abs(df['icer_upper_num'] - df['icer_lower_num'])
+df = df.sort_values('swing', ascending=False).reset_index(drop=True)
+
+# Step 3: Display results
+print("\nTop 10 Most Influential Parameters:")
+print("-" * 50)
+for i, row in df.head(10).iterrows():
+    l = f"£{row['icer_lower']:,.0f}" if isinstance(row['icer_lower'], (int,float)) else row['icer_lower']
+    u = f"£{row['icer_upper']:,.0f}" if isinstance(row['icer_upper'], (int,float)) else row['icer_upper']
+    print(f"{i+1:2}. {row['name']:<30} {l} to {u}")
+
+# ============================================================================
+# TORNADO DIAGRAM
+# ============================================================================
+
+print("\nGenerating tornado diagram...")
+
+df_plot = df.head(15)
+fig, ax = plt.subplots(figsize=(12, 9))
+
+colors = {'Treatment': '#2E86AB', 'CVD Risk': '#A23B72', 'Clinical': '#F18F01',
+          'Utility': '#C73E1D', 'Cost': '#3B1F2B', 'Structural': '#95190C'}
+
+for i, row in df_plot.iterrows():
+    left = min(row['icer_lower_num'], row['icer_upper_num'])
+    width = abs(row['icer_upper_num'] - row['icer_lower_num'])
+    ax.barh(i, width, left=left, color=colors.get(row['category'], '#666'), alpha=0.85, height=0.7)
+
+ax.axvline(0, color='black', linestyle='--', linewidth=2)
+ax.axvline(20000, color='green', linestyle=':', linewidth=1.5)
+ax.axvline(30000, color='orange', linestyle=':', linewidth=1.5)
+
+ax.set_yticks(range(len(df_plot)))
+ax.set_yticklabels(df_plot['name'], fontsize=10)
+ax.invert_yaxis()
+ax.set_xlabel('ICER (£/QALY)', fontsize=12)
+ax.set_title('One-Way Sensitivity Analysis: Tornado Diagram\nCOPD-CVD Markov Model', fontsize=14, fontweight='bold')
+
+ax.axvspan(-35000, 0, alpha=0.08, color='green')
+ax.text(-17500, len(df_plot)-0.5, 'Dominant\nRegion', ha='center', fontsize=9, color='darkgreen')
+
+legend_items = [Patch(facecolor=c, label=cat, alpha=0.85) for cat, c in colors.items() if cat in df_plot['category'].values]
+legend_items += [
+    plt.Line2D([0], [0], color='black', linestyle='--', linewidth=2, label='Base case'),
+    plt.Line2D([0], [0], color='green', linestyle=':', linewidth=1.5, label='£20k threshold'),
+    plt.Line2D([0], [0], color='orange', linestyle=':', linewidth=1.5, label='£30k threshold'),
+]
+ax.legend(handles=legend_items, loc='lower right', fontsize=9)
+ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'£{x/1000:.0f}k'))
+ax.set_xlim(-35000, 50000)
+
+plt.tight_layout()
+fig.savefig(OUTPUT_PATH + 'OWSA_tornado.png', dpi=150, bbox_inches='tight')
+print(f"Saved: {OUTPUT_PATH}OWSA_tornado.png")
+
+df.to_csv(OUTPUT_PATH + 'OWSA_results.csv', index=False)
+print(f"Saved: {OUTPUT_PATH}OWSA_results.csv")
+
+print("\n" + "=" * 50)
+print("OWSA COMPLETE")
+print(f"Most influential parameter: {df.iloc[0]['name']}")
